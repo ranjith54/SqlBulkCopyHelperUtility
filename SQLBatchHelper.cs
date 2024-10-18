@@ -4,8 +4,83 @@ using System.Text;
 
 namespace SqlBulkCopyHelperUtility
 {
-    public class SQLBatchUpdateHelper
+    public class SQLBatchHelper
     {
+
+        /// <summary>
+        /// Deletes a batch of items from a specified table based on key properties.
+        /// The method performs the operation in batches to avoid excessive transaction log growth 
+        /// and to mitigate potential lock escalation issues in SQL Server.
+        /// </summary>
+        /// <typeparam name="T">The type of the items to delete. It must have a TableAttribute to specify the target table.</typeparam>
+        /// <param name="conn">The SQL connection to use for the delete operation.</param>
+        /// <param name="sqlTransaction">The SQL transaction within which the operation will be executed.</param>
+        /// <param name="items">The list of items to delete. Each item must have properties corresponding to the key columns.</param>
+        /// <param name="keyProperties">An array of property names that act as the key columns for identifying records to delete.</param>
+        /// <exception cref="ArgumentNullException">Thrown when the connection, transaction, or items list is null.</exception>
+        /// <exception cref="ArgumentException">Thrown when the items list or key properties array is empty, or when the table name is not found.</exception>
+        public static void BatchDelete<T>(
+        SqlConnection conn,
+        SqlTransaction sqlTransaction,
+        List<T> items,
+        string[] keyProperties)
+        {
+            // Validate inputs
+            if (items == null || !items.Any())
+                throw new ArgumentException("The items list cannot be null or empty.", nameof(items));
+
+            if (keyProperties == null || !keyProperties.Any())
+                throw new ArgumentException("Key properties cannot be null or empty.", nameof(keyProperties));
+
+            StringBuilder deleteString = new StringBuilder();
+            int totalItems = items.Count;
+            int batchSize = 300;  // Similar to batch update size
+
+            // Get the TableAttribute applied to the property
+            var tableAttribute = typeof(T).GetCustomAttributes(typeof(TableAttribute), false)
+                                          .FirstOrDefault() as TableAttribute;
+
+            string table = tableAttribute?.Name;
+
+            if (string.IsNullOrWhiteSpace(table))
+                throw new ArgumentException("Table name cannot be null or empty.", nameof(table));
+
+            for (int i = 0; i < totalItems; i += batchSize)
+            {
+                int currentBatchSize = Math.Min(batchSize, totalItems - i);
+                deleteString.Clear();
+                deleteString.Append($"DELETE {table} FROM {table} INNER JOIN (VALUES ");
+
+                var parameters = new List<SqlParameter>();
+
+                // Append parameters for the current batch
+                for (int j = 0; j < currentBatchSize; j++)
+                {
+                    var currentItem = items[i + j];
+                    parameters.AddRange(CreateParameters(currentItem, keyProperties, i + j));
+
+                    deleteString.Append($"({string.Join(", ", keyProperties.Select(x => $"@{x}_{i + j}"))}), ");
+                }
+
+                deleteString.Length -= 2; // Remove the last comma and space
+                deleteString.Append($") AS x({string.Join(", ", keyProperties)}) ON ");
+
+                // Build the ON condition using key properties
+                foreach (var prop in keyProperties)
+                {
+                    deleteString.Append($"x.{prop} = {table}.{prop} AND ");
+                }
+                deleteString.Length -= 5; // Remove the last AND
+
+                // Execute the batch delete
+                using (SqlCommand deleteCmd = new SqlCommand(deleteString.ToString(), conn, sqlTransaction))
+                {
+                    deleteCmd.Parameters.AddRange(parameters.ToArray());
+                    deleteCmd.ExecuteNonQuery();
+                }
+            }
+        }
+
         /// <summary>
         /// Executes a batch update of items in the specified database table.
         /// The method processes items in batches, constructs an SQL UPDATE statement for each batch,
